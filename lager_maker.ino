@@ -2,11 +2,10 @@
 Arduino thermostatic relay controller
 */
 
-#define THERM_OFFSET 5.5 //adjust the temp reading
-#define THERM_RESISTOR 9950 //as measure w/ a multimeter (thermistor only) - should be around 10k
-
-const double vdivMult = 34.5; //should equal to (about) R1 / R2 (10k / 330)
-double voltage = 5.0;
+#define THERM_OFFSET 5.0 //adjust the temp reading
+#define THERM_RESISTOR 9950 //as measured w/ a multimeter (thermistor only) - should be around 10k
+#define VDIV_R1 10700 //as measured w/ a multimeter for "voltage" circuit - should be around 10k
+#define VDIV_R2 340 //as measured w/ a multimeter for "voltage" circuit - should be around 330
 
 //time constants (all in milliseconds)
 const unsigned long second1 = 1000;
@@ -54,13 +53,14 @@ typedef struct {
 //setup stage details here
 const int stageNum = 5;
 stage stages[stageNum] = {
-  { 56, 56, week1 * 2 },
-  //split secondary into 3 stages
+  //primary fermentation
+  { 56, 56, 2* week1 },
+  //split secondary fermentation into 3 stages
   { 56, 49, week1 },
   { 49, 42, week1 },
   { 42, 35, week1 },
   //conditioning (ready to drink)
-  { 35, 35, week1 * 3 }
+  { 35, 35, 3 * week1 }
 };
 
 //button hold constants
@@ -72,6 +72,7 @@ const char names[] = { 'c', 'd', 'e', 'f', 'g', 'a', 'b', 'C' };
 const int tones[] = { 1915, 1700, 1519, 1432, 1275, 1136, 1014, 956 };
 
 //runtime variables
+double voltage = 5.0;
 int stageCurrent = -1; //start at -1, nextStage() will advance us to stage[0] (1st stage)
 boolean theEnd = false;
 unsigned long stageStart;
@@ -90,7 +91,7 @@ void setup() {
   pinMode(relayPin, OUTPUT);      
   pinMode(buttonPin, INPUT);  
   pinMode(speakerPin, OUTPUT);
-  //pinMode(voltagePin, INPUT);
+  pinMode(voltagePin, INPUT);
   
   // We'll send debugging information via the Serial monitor
   Serial.begin(9600); 
@@ -98,10 +99,11 @@ void setup() {
   //set the voltage to 1.1v and then use a divider to determine our actual voltage  
   analogReference(INTERNAL);
   
+  //read the voltage a few times until we get two of the same readings
   voltage = readVoltage();
   double oldVoltage = 0.0;
-  while ( oldVoltage != voltage ) {
-     delay(4000); // wait
+  while(oldVoltage != voltage) {
+     delay(4 * second1); // wait
      oldVoltage = voltage;
      voltage = readVoltage(); 
   }
@@ -118,8 +120,10 @@ void setup() {
 }
 
 double readVoltage(){
+  //use a voltage divider (R1 = 10k, R2 = 330) against 1.1v 
+  //to figure out what our actual "5v" reference voltage is
   int sensorValue = analogRead(voltagePin);  
-  return (sensorValue/1024.0)*34.5;
+  return (sensorValue/1024.0)*((VDIV_R1 / VDIV_R2) * 1.1);
 }
 
 
@@ -130,7 +134,7 @@ void loop() {
   if(stageStart + stages[stageCurrent].duration > millis()) { //active stage
     unsigned long elapsed = millis() - lastRead;
       
-    if ( elapsed > readDelay ) {
+    if(elapsed > readDelay) {
       lastRead = millis();
       
       //Serial.println("tmp36");
@@ -177,7 +181,6 @@ double dissipation(double R) {
 double thermRead() { 
   int sensorValue = analogRead(thermPin);
 
-  //Vout = AREF_VOLTAGE * (THERM_RESISTOR/(R1 + THERM_RESISTOR)) = analogread
   double Vout = sensorValue * (voltage/1024); //convert the ADC reading from the analog pin into a voltage. 
   //We'll need this to calculate the thermistor's resistance next
   
@@ -211,18 +214,18 @@ double toF(double temperatureC) {
 void regulateTemp() {
   calculateTemp();
   
-  if (abs(currentTemp - targetTemp) < degreeBuffer) { //If approx. temp is within range of desired temp
+  if(abs(currentTemp - targetTemp) < degreeBuffer) { //If approx. temp is within range of desired temp
     digitalWrite(relayPin, LOW); //err on this side of energy savings
     return;
   }    
         
-  if (currentTemp < targetTemp) { //If below target temp
-    if ( cool )
+  if(currentTemp < targetTemp) { //If below target temp
+    if(cool)
       digitalWrite(relayPin, LOW); 
     else
       digitalWrite(relayPin, HIGH); 
-  } else if (currentTemp > targetTemp) { //If above target temp
-    if ( cool )
+  } else if(currentTemp > targetTemp) { //If above target temp
+    if(cool)
       digitalWrite(relayPin, HIGH);
     else
       digitalWrite(relayPin, LOW); 
@@ -236,7 +239,7 @@ void calculateTemp() {
 }
 
 void nextStage() {
-  if (stageCurrent >= stageNum - 1) {
+  if(stageCurrent >= stageNum - 1) {
      stageCurrent = 0; 
   } else {
      stageCurrent++; 
@@ -258,14 +261,14 @@ void buttonRead() {
   buttonState = digitalRead(buttonPin);
 
   // Test for button pressed and store the down time
-  if (buttonState == LOW && buttonLastState == HIGH && (millis() - btnUpTime) > debounce) {
+  if(buttonState == LOW && buttonLastState == HIGH && (millis() - btnUpTime) > debounce) {
     btnDnTime = millis();
   }
 
   // Test for button release and store the up time
-  if (buttonState == HIGH && buttonLastState == LOW && (millis() - btnDnTime) > debounce)
+  if(buttonState == HIGH && buttonLastState == LOW && (millis() - btnDnTime) > debounce)
   {
-    if (ignoreUp == false)
+    if(ignoreUp == false)
       report(); //do short press activity
     else 
       ignoreUp = false;
@@ -273,7 +276,7 @@ void buttonRead() {
   }
 
   // Test for button held down for longer than the hold time
-  if (buttonState == LOW && (millis() - btnDnTime) > holdTime)
+  if(buttonState == LOW && (millis() - btnDnTime) > holdTime)
   {
     nextStage();
     report();
@@ -303,7 +306,7 @@ void report() {
     delay(second1);
     int firstDigit = (int)currentTemp / 10;
     soundOff(firstDigit, 'c', second1);
-    delay(second1 * .75);
+    delay(.75 * second1);
     int secondDigit = (int)currentTemp % 10;
     soundOff(secondDigit, 'c', .5 * second1);
     
@@ -314,21 +317,21 @@ void report() {
     delay(second1);
     firstDigit = (int)targetTemp / 10;
     soundOff(firstDigit, 'C', second1);
-    delay(second1 * .75);
+    delay(.75 * second1);
     secondDigit = (int)targetTemp % 10;
     soundOff(secondDigit, 'C', .5 * second1);
   }
 }
 
 void soundOff(int tones, char note, int duration) {
-  for ( int x = 0; x < tones; x++ ) {
-   playNote(note, duration); 
-   delay( .5 * second1 );
+  for(int x = 0; x < tones; x++) {
+    playNote(note, duration); 
+    delay(.5 * second1);
   }
 }
 
 void playTone(int tone, int duration) {
-  for (long i = 0; i < duration * 1000L; i += tone * 2) {
+  for(long i = 0; i < duration * 1000L; i += tone * 2) {
     digitalWrite(speakerPin, HIGH);
     delayMicroseconds(tone);
     digitalWrite(speakerPin, LOW);
@@ -338,8 +341,8 @@ void playTone(int tone, int duration) {
 
 void playNote(char note, int duration) {  
   // play the tone corresponding to the note name
-  for (int i = 0; i < 8; i++) {
-    if (names[i] == note) {
+  for(int i = 0; i < 8; i++) {
+    if(names[i] == note) {
       playTone(tones[i], duration);
     }
   }
