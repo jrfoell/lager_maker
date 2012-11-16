@@ -22,7 +22,7 @@ const double C = 5.0580813554846e-8;
 
 //for beta parameter equation
 const int betaParam = 4038.0;
-double rinfinit = 0.013186042797417;
+double rInfinite = 0.013186042797417;
 
 const double dissFactor = 6.5; // mW/dec C – dissipation factor
 
@@ -41,7 +41,11 @@ const boolean cool = true;
 //temperature constants
 //adjust these if cycling on/off too fast/slow
 const int degreeBuffer = 1;
-const unsigned long readDelay = 2 * second1;
+const unsigned long readDelay = 10 * second1;
+//how many times a 'low' or 'high' temperature needs to be seen (consecutively) 
+//before taking action. in this case if we read every 10s, we'll need to see an 
+//out of range temp for over a minute before adjusting the relay
+const int adjustBuffer = 6;
 
 //stage definition - do not modify
 typedef struct {
@@ -54,7 +58,7 @@ typedef struct {
 const int stageNum = 5;
 stage stages[stageNum] = {
   //primary fermentation
-  { 56, 56, 2* week1 },
+  { 56, 56, 2 * week1 },
   //split secondary fermentation into 3 stages
   { 56, 49, week1 },
   { 49, 42, week1 },
@@ -85,6 +89,9 @@ int buttonLastState = 0; // buffered value of the button's previous state
 long btnDnTime; // time the button was pressed down
 long btnUpTime; // time the button was released
 boolean ignoreUp = true; // whether to ignore the button release because the click+hold was triggered
+int highCount = 0;
+int lowCount = 0;
+int rangeCount = 0;
 
 void setup() {
   
@@ -108,7 +115,7 @@ void setup() {
      voltage = readVoltage(); 
   }
   Serial.print("Settled on Voltage=");
-  Serial.println(voltage, 2);
+  Serial.println(voltage);
   
   //set back to (around) 5.0v
   analogReference(DEFAULT); 
@@ -118,14 +125,6 @@ void setup() {
   //start with the first stage
   nextStage();
 }
-
-double readVoltage(){
-  //use a voltage divider (R1 = 10k, R2 = 330) against 1.1v 
-  //to figure out what our actual "5v" reference voltage is
-  int sensorValue = analogRead(voltagePin);  
-  return (sensorValue/1024.0)*((VDIV_R1 / VDIV_R2) * 1.1);
-}
-
 
 void loop() {
   //check & do button functions
@@ -156,6 +155,14 @@ void loop() {
   }
 }
 
+//@see http://forums.adafruit.com/viewtopic.php?f=25&t=18804#p99357
+double readVoltage(){
+  //use a voltage divider (R1 = 10k, R2 = 330) against 1.1v 
+  //to figure out what our actual "5v" reference voltage is
+  int sensorValue = analogRead(voltagePin);  
+  return (sensorValue/1024.0)*((VDIV_R1 / VDIV_R2) * 1.1);
+}
+
 double tmp36Read() {
   int sensorValue = analogRead(tmp36Pin);  
   // converting that reading to voltage, which is based off the reference voltage
@@ -165,15 +172,18 @@ double tmp36Read() {
                                       //to degrees ((volatge - 500mV) times 100)  
 }
 
+//@see http://en.wikipedia.org/wiki/Steinhart-Hart_equation
 double steinhartHart(double R) {
   //Steinhart-Hart thermistor equation, this gives us temperature in Kelvin
   return 1 / (A + B * log(R) + C * pow(log(R), 3));   
 }
 
+//@see http://en.wikipedia.org/wiki/Thermistor#B_or_.CE.B2_parameter_equation
 double beta(double R) {
-  return betaParam/log(R/rinfinit);
+  return betaParam/log(R/rInfinite);
 }
 
+//@see http://disipio.wordpress.com/2009/07/17/temperature-measurement-using-arduino-and-a-thermistor/
 double dissipation(double R) {
    return pow(voltage, 2)/(dissFactor * R);
 }
@@ -193,7 +203,7 @@ double thermRead() {
   //Serial.println("Beta");
   return toF(temp);  
   
-  //show the SH calc'ed temp
+  //show the S-H calc'ed temp
   /*
   temp = steinhartHart(R1) - dissipation(R1);   
   temp += -273.15; // Convert Kelvin to Celcius  
@@ -207,28 +217,41 @@ double toF(double temperatureC) {
  
   // now convert to Fahrenheight
   double temp = (temperatureC * 9.0 / 5.0) + 32.0 + THERM_OFFSET;
-  Serial.print(temp, 2); Serial.println(" degrees F (corrected)");
+  Serial.print(temp); Serial.println(" degrees F (corrected)");
   return temp;
 }
 
 void regulateTemp() {
   calculateTemp();
   
+  //3 cases:
   if(abs(currentTemp - targetTemp) < degreeBuffer) { //If approx. temp is within range of desired temp
-    digitalWrite(relayPin, LOW); //err on this side of energy savings
-    return;
-  }    
-        
-  if(currentTemp < targetTemp) { //If below target temp
-    if(cool)
-      digitalWrite(relayPin, LOW); 
-    else
-      digitalWrite(relayPin, HIGH); 
+    rangeCount++;
+    lowCount = highCount = 0; //reset these
+    if (rangeCount > adjustBuffer) {
+      rangeCount = 0;
+      digitalWrite(relayPin, LOW); //err on this side of energy savings
+    }
+  } else if(currentTemp < targetTemp) { //If below target temp
+    lowCount++;
+    rangeCount = highCount = 0;
+    if (lowCount > adjustBuffer) {
+      lowCount = 0;
+      if(cool)
+        digitalWrite(relayPin, LOW); 
+      else
+        digitalWrite(relayPin, HIGH); 
+    }
   } else if(currentTemp > targetTemp) { //If above target temp
-    if(cool)
-      digitalWrite(relayPin, HIGH);
-    else
-      digitalWrite(relayPin, LOW); 
+    highCount++;
+    rangeCount = lowCount = 0;
+    if(highCount > adjustBuffer) {
+      highCount = 0;
+      if(cool)
+        digitalWrite(relayPin, HIGH);
+      else
+        digitalWrite(relayPin, LOW);
+    } 
   }
 }
 
@@ -255,7 +278,7 @@ void nextStage() {
   calculateTemp();
 }
 
-//button function
+//@see http://jmsarduino.blogspot.com/2009/05/click-for-press-and-hold-for-b.html
 void buttonRead() {
   // read the state of the pushbutton value:
   buttonState = digitalRead(buttonPin);
@@ -330,6 +353,7 @@ void soundOff(int tones, char note, int duration) {
   }
 }
 
+//@see http://ardx.org/CIRC06/
 void playTone(int tone, int duration) {
   for(long i = 0; i < duration * 1000L; i += tone * 2) {
     digitalWrite(speakerPin, HIGH);
